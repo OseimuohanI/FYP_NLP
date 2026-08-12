@@ -10,8 +10,9 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def disable_network_models_for_api_tests():
+def disable_network_models_for_api_tests(monkeypatch):
     """Endpoint tests exercise the stable lexicon fallback, never the Hub."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     live_model = model_module.model
     old_state = (
         live_model.general_model, live_model.pidgin_model,
@@ -57,6 +58,9 @@ def test_predict_batch():
     data = response.json()
     assert isinstance(data["results"], list)
     assert len(data["results"]) == 3
+    assert 1.0 <= data["summary"]["rating"] <= 5.0
+    assert 0.0 <= data["summary"]["average_confidence"] <= 1.0
+    assert data["summary"]["summary_text"]
 
 
 @pytest.mark.parametrize("bad_payload", [{"text": None}, {"text": ""}, {}])

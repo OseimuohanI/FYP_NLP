@@ -43,8 +43,15 @@ class SentimentResult(BaseModel):
     model_used: Literal["general", "pidgin", "lexicon_fallback"]
 
 
+class BatchSummary(BaseModel):
+    rating: float = Field(ge=1.0, le=5.0)
+    average_confidence: float = Field(ge=0.0, le=1.0)
+    summary_text: str
+
+
 class BatchPredictResponse(BaseModel):
     results: List[SentimentResult]
+    summary: BatchSummary
 
 
 class HealthResponse(BaseModel):

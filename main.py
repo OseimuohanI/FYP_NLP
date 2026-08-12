@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 import model as model_module
+from aggregation import build_batch_summary
 from model import predict
 from schemas import BatchPredictRequest, BatchPredictResponse, HealthResponse, PredictRequest, SentimentResult
 
@@ -59,7 +60,9 @@ def predict_single(payload: PredictRequest):
 def predict_batch(payload: BatchPredictRequest):
     try:
         results = [predict(item) for item in payload.texts]
-        return BatchPredictResponse(results=results)
+        return BatchPredictResponse(
+            results=results, summary=build_batch_summary(payload.texts, results)
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - defensive catch
