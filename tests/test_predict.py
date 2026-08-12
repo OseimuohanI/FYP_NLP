@@ -68,13 +68,15 @@ def test_invalid_payloads(bad_payload):
 class FakeClassifier:
     def __init__(self, scores, id2label=None):
         self.scores = scores
+        self.calls = []
         self.model = type("Model", (), {"config": type("Config", (), {"id2label": id2label or {}})()})()
 
     def __call__(self, text, **kwargs):
+        self.calls.append((text, kwargs))
         return self.scores
 
 
-def ensemble(general, pidgin):
+def router(general, pidgin):
     instance = SentimentModel(pipeline_factory=lambda *args, **kwargs: None)
     instance.general_model, instance.pidgin_model = general, pidgin
     instance._general_attempted = instance._pidgin_attempted = True
@@ -83,32 +85,34 @@ def ensemble(general, pidgin):
 
 
 def test_threshold_value_is_not_neutral_when_transformers_unavailable():
-    instance = ensemble(None, None)
+    instance = router(None, None)
     result = instance.predict("Sabi")
     assert result.label == "positive"
     assert result.model_used == "lexicon_fallback"
 
 
-def test_pidgin_model_wins_when_it_has_higher_confidence():
-    instance = ensemble(
-        FakeClassifier([{"label": "negative", "score": 0.60}]),
-        FakeClassifier([{"label": "positive", "score": 0.91}]),
-    )
+def test_pidgin_marker_routes_to_pidgin_model_without_calling_general_model():
+    general = FakeClassifier([{"label": "negative", "score": 0.99}])
+    pidgin = FakeClassifier([{"label": "positive", "score": 0.60}])
+    instance = router(general, pidgin)
     result = instance.predict("This thing mad o, I really love am")
     assert (result.label, result.model_used) == ("positive", "pidgin")
+    assert general.calls == []
+    assert len(pidgin.calls) == 1
 
 
-def test_general_model_wins_mixed_pidgin_english_context():
-    instance = ensemble(
-        FakeClassifier([{"label": "negative", "score": 0.88}]),
-        FakeClassifier([{"label": "positive", "score": 0.62}]),
-    )
-    result = instance.predict("E sweet at first but the delivery was terrible")
+def test_text_without_pidgin_marker_routes_to_general_model():
+    general = FakeClassifier([{"label": "negative", "score": 0.60}])
+    pidgin = FakeClassifier([{"label": "positive", "score": 0.91}])
+    instance = router(general, pidgin)
+    result = instance.predict("The delivery was terrible")
     assert (result.label, result.model_used) == ("negative", "general")
+    assert len(general.calls) == 1
+    assert pidgin.calls == []
 
 
 def test_context_case_can_choose_pidgin_for_opposite_mad_o_meaning():
-    instance = ensemble(
+    instance = router(
         FakeClassifier([{"label": "positive", "score": 0.61}]),
         FakeClassifier([{"label": "negative", "score": 0.89}]),
     )
@@ -116,10 +120,10 @@ def test_context_case_can_choose_pidgin_for_opposite_mad_o_meaning():
     assert (result.label, result.model_used) == ("negative", "pidgin")
 
 
-def test_native_label_indices_are_read_from_that_models_config():
-    instance = ensemble(
-        FakeClassifier([{"label": "LABEL_0", "score": 0.70}], {0: "negative"}),
+def test_pidgin_label_indices_use_the_documented_model_card_mapping():
+    instance = router(
         None,
+        FakeClassifier([{"label": "LABEL_0", "score": 0.70}], {0: "negative"}),
     )
-    result = instance.predict("ordinary review")
-    assert (result.label, result.model_used) == ("negative", "general")
+    result = instance.predict("Sabi")
+    assert (result.label, result.model_used) == ("positive", "pidgin")

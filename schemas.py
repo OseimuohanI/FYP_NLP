@@ -1,15 +1,5 @@
 """
-schemas.py — replaces FYP_NLP/schemas.py
-
-Changes from the original:
-1. BatchPredictRequest.texts now has a max_length cap (default 100). The
-   original had no upper bound, so Laravel sending a very large batch in
-   one synchronous call could block a request for a long time with no
-   queue behind it. If you need larger batches, chunk them on the Laravel
-   side rather than raising this limit too far.
-2. HealthResponse now includes `mode`, so /health can tell you whether the
-   transformer or the lexicon fallback is actually serving predictions —
-   this pairs with the logging added in model.py.
+schemas.py
 """
 
 from typing import List, Literal, Optional

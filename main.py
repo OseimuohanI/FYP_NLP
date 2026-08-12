@@ -1,18 +1,5 @@
 """
-main.py — replaces FYP_NLP/main.py
-
-Changes from the original:
-1. The model is now preloaded at FastAPI startup (`@app.on_event("startup")`)
-   instead of lazily on the first `/predict` call. Previously, whoever hit
-   the API first (e.g. an examiner during a live demo) would eat the full
-   ~1GB model load time. Now that cost happens once, when the container
-   starts, before it's serving traffic.
-2. `/health` now reports the actual active mode (transformer vs lexicon
-   fallback) via model.get_status(), instead of a hardcoded model name
-   string that would lie to you if the transformer had silently failed
-   to load.
-3. Basic logging configuration added so the warnings/errors added in
-   model.py are actually visible in your container logs.
+main.py
 """
 
 import logging

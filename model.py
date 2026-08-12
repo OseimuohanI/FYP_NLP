@@ -1,4 +1,4 @@
-"""Sentiment inference with a confidence-based general/Pidgin ensemble."""
+"""Sentiment inference with marker-based general/Pidgin model routing."""
 
 import logging
 import os
@@ -7,13 +7,20 @@ from typing import Any, Callable, Optional
 import torch
 from transformers import pipeline
 
-from preprocessing import clean_text, compute_english_lexicon_boost, compute_pidgin_boost, preserve_emphasis
+from preprocessing import (
+    clean_text,
+    compute_english_lexicon_boost,
+    compute_pidgin_boost,
+    is_pidgin_leaning,
+    preserve_emphasis,
+)
 from schemas import SentimentResult
 
 logger = logging.getLogger("sentiment_model")
 
 DEFAULT_GENERAL_MODEL = "cardiffnlp/twitter-xlm-roberta-base-sentiment"
 DEFAULT_PIDGIN_MODEL = "Davlan/naija-twitter-sentiment-afriberta-large"
+PIDGIN_ID_TO_LABEL = {"0": "positive", "1": "neutral", "2": "negative"}
 
 
 def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
@@ -21,12 +28,7 @@ def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
 
 
 class SentimentModel:
-    """Run both specialised classifiers and select the more confident result.
-
-    The Pidgin model's published config maps 0/1/2 to
-    positive/neutral/negative.  Labels are nevertheless read from each loaded
-    model's config at runtime, rather than assuming either pipeline's scheme.
-    """
+    """Route Pidgin-marked text to the Pidgin model and all other text to general."""
 
     def __init__(
         self,
@@ -93,7 +95,9 @@ class SentimentModel:
         else:
             self.mode = "unloaded"
 
-    def _normalize_label(self, label: str, classifier: Optional[Any] = None) -> str:
+    def _normalize_label(
+        self, label: str, classifier: Optional[Any] = None, model_used: str = "general"
+    ) -> str:
         """Map native labels (including LABEL_0) to the API's three labels."""
         raw = str(label).lower().strip()
         if "pos" in raw:
@@ -103,18 +107,25 @@ class SentimentModel:
         if "neu" in raw:
             return "neutral"
 
-        # Pipelines sometimes return LABEL_n. Consult the particular model's
-        # config, which is necessary because label indices are not universal.
+        # Applied based on the model card's documented usage example — confirm
+        # against the actual model.config.id2label output once the diagnostic
+        # script has been run, and adjust if they don't match.
+        if model_used == "pidgin" and (raw.startswith("label_") or raw.isdigit()):
+            index = raw.rsplit("_", 1)[-1]
+            return PIDGIN_ID_TO_LABEL.get(index, "neutral")
+
+        # General-model pipelines sometimes return LABEL_n. Consult that
+        # model's config because its label indices are not universal.
         if classifier is not None and raw.startswith("label_"):
             index = raw.rsplit("_", 1)[-1]
             id2label = getattr(getattr(classifier, "model", None), "config", None)
             id2label = getattr(id2label, "id2label", {}) or {}
             configured = id2label.get(index, id2label.get(int(index), ""))
             if configured and str(configured).lower() != raw:
-                return self._normalize_label(str(configured))
+                return self._normalize_label(str(configured), model_used=model_used)
         return "neutral"
 
-    def _best_prediction(self, classifier: Any, text: str) -> dict[str, float | str]:
+    def _best_prediction(self, classifier: Any, text: str, model_used: str) -> dict[str, float | str]:
         raw_output = classifier(text, truncation=True, max_length=512)
         # top_k=None gives a list of label dictionaries for one input. Be
         # defensive about pipeline-version output nesting.
@@ -123,7 +134,7 @@ class SentimentModel:
         scored = raw_output if isinstance(raw_output, list) else [raw_output]
         best = max(
             (
-                {"label": self._normalize_label(item.get("label", "neutral"), classifier),
+                {"label": self._normalize_label(item.get("label", "neutral"), classifier, model_used),
                  "score": float(item.get("score", 0.0))}
                 for item in scored
                 if isinstance(item, dict)
@@ -159,20 +170,28 @@ class SentimentModel:
         if not cleaned:
             raise ValueError("text cannot be empty or whitespace-only")
 
-        # No language router: both models see every non-empty request.
+        pidgin_leaning = is_pidgin_leaning(cleaned)
         general = self._load_general_model()
         pidgin = self._load_pidgin_model()
         self._update_mode()
-        candidates = []
-        if general is not None:
-            candidates.append(("general", self._best_prediction(general, cleaned)))
-        if pidgin is not None:
-            candidates.append(("pidgin", self._best_prediction(pidgin, cleaned)))
-        if not candidates:
+
+        # Make one inference call: the marker router selects the preferred
+        # model, then uses the other loaded model only if the preferred one is
+        # unavailable.
+        if pidgin_leaning and pidgin is not None:
+            model_used, classifier = "pidgin", pidgin
+        elif not pidgin_leaning and general is not None:
+            model_used, classifier = "general", general
+        elif general is not None:
+            logger.warning("Pidgin route selected but Pidgin model is unavailable; using general model.")
+            model_used, classifier = "general", general
+        elif pidgin is not None:
+            logger.warning("General route selected but general model is unavailable; using Pidgin model.")
+            model_used, classifier = "pidgin", pidgin
+        else:
             return self._fallback_predict(cleaned)
 
-        # max is stable: ties deliberately favour the general model.
-        model_used, best = max(candidates, key=lambda candidate: float(candidate[1]["score"]))
+        best = self._best_prediction(classifier, cleaned, model_used)
         label = str(best["label"])
         confidence = float(best["score"])
         return SentimentResult(

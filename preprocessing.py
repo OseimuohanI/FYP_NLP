@@ -1,19 +1,5 @@
 """
-preprocessing.py — replaces FYP_NLP/preprocessing.py
-
-Changes from the original:
-1. compute_pidgin_boost now uses word-boundary regex matching instead of
-   plain substring `in` checks, and masks matched phrases before checking
-   shorter ones so overlapping entries (e.g. "no be" inside "e no be") are
-   not double-counted.
-2. Added an English sentiment lexicon (compute_english_lexicon_boost) so
-   the fallback predictor isn't blind to plain English reviews.
-3. Corrected four PIDGIN_LEXICON values using baseline test evidence and
-   added the separate "no wahala" phrase. The lexicon remains available only
-   for the no-transformer fallback, not as a transformer override.
-4. Removed a dead/redundant regex in normalize_elongated_words (the
-   generic elongation collapse already handled "goooood" -> "good"
-   before the specific pattern ever had a chance to match).
+preprocessing.py
 """
 
 import html
@@ -23,8 +9,8 @@ import unicodedata
 # Baseline-test evidence corrected wahala, shine your eye, no gree and mad o.
 # Context-dependent entries (especially no gree and mad o) are lower-confidence
 # signals, not settled ground truth; validate them against real examples. This
-# lexicon is fallback-only now that transformer predictions use a dual-model
-# confidence ensemble, so it must never override a transformer prediction.
+# lexicon is fallback-only now that transformer predictions use the
+# marker-based router, so it must never override a transformer prediction.
 PIDGIN_LEXICON = {
     "no wahala": 0.5,
     "no gree": -0.3,  # lower-confidence correction; validate on real examples
@@ -51,7 +37,8 @@ PIDGIN_LEXICON = {
 # fallback predictor (used when the transformer fails to load) and the
 # short-text path aren't blind to plain English reviews that contain no
 # Pidgin at all. Not exhaustive — extend as you see false negatives during
-# testing.
+# testing. It is also used as a marker detector by the router; polarity values
+# affect only the lexicon fallback, not the routing decision.
 ENGLISH_LEXICON = {
     "good": 0.5, "great": 0.7, "excellent": 0.9, "amazing": 0.9,
     "love": 0.8, "perfect": 0.9, "best": 0.7, "fast": 0.4,
@@ -129,6 +116,21 @@ def _word_boundary_matches(phrase: str, text: str) -> list:
     """Find whole-phrase matches (not substrings of other words)."""
     pattern = r"(?<!\w)" + re.escape(phrase) + r"(?!\w)"
     return re.findall(pattern, text)
+
+
+def is_pidgin_leaning(text: str) -> bool:
+    """Return whether at least one distinct curated Pidgin marker is present.
+
+    Matching deliberately uses the same whole-phrase boundaries as the
+    lexicon fallback. A single confirmed marker is enough to route a request
+    to the Pidgin-tuned classifier.
+    """
+    lowered = text.lower()
+    marker_count = sum(
+        bool(_word_boundary_matches(phrase, lowered))
+        for phrase in PIDGIN_LEXICON
+    )
+    return marker_count >= 1
 
 
 def compute_pidgin_boost(text: str) -> float:
