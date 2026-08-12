@@ -8,12 +8,9 @@ Changes from the original:
    not double-counted.
 2. Added an English sentiment lexicon (compute_english_lexicon_boost) so
    the fallback predictor isn't blind to plain English reviews.
-3. Flagged several PIDGIN_LEXICON entries whose polarity looks questionable
-   to me (see comments below) — I did NOT change the values myself since
-   I'm not confident enough in Nigerian Pidgin slang nuance to assign
-   authoritative polarity. Worth validating against a native speaker or
-   published resources (e.g. NaijaSenti / AfriSenti papers) before your
-   final submission.
+3. Corrected four PIDGIN_LEXICON values using baseline test evidence and
+   added the separate "no wahala" phrase. The lexicon remains available only
+   for the no-transformer fallback, not as a transformer override.
 4. Removed a dead/redundant regex in normalize_elongated_words (the
    generic elongation collapse already handled "goooood" -> "good"
    before the specific pattern ever had a chance to match).
@@ -23,29 +20,20 @@ import html
 import re
 import unicodedata
 
-# NOTE ON POLARITY VALUES BELOW — flagged, not changed:
-# - "wahala": scored +0.8 (positive). "Wahala" usually means trouble/problem
-#   and skews negative in most standalone usage ("wahala for you" = trouble
-#   for you). Worth double-checking this isn't backwards.
-# - "how body": scored +0.7. This is mostly a neutral greeting ("how are
-#   you"), not obviously sentiment-bearing — 0.7 seems high for a greeting.
-# - "shey": scored +0.1. This is a discourse/question marker ("isn't it?"),
-#   generally neutral regardless of context — may not deserve any weight.
-# - "naija": scored +0.2. This just means "Nigeria" — a review mentioning
-#   the country by name isn't inherently positive. This could bias any
-#   review that happens to reference Nigeria at all.
-# - "mad o": scored -0.7. In a lot of Nigerian slang usage "mad o" can mean
-#   impressive/wild in a *good* way ("this thing mad o!"), so a flat
-#   negative score may be backwards depending on context. Slang polarity
-#   here is genuinely context-dependent and risky to hardcode either way.
+# Baseline-test evidence corrected wahala, shine your eye, no gree and mad o.
+# Context-dependent entries (especially no gree and mad o) are lower-confidence
+# signals, not settled ground truth; validate them against real examples. This
+# lexicon is fallback-only now that transformer predictions use a dual-model
+# confidence ensemble, so it must never override a transformer prediction.
 PIDGIN_LEXICON = {
-    "no gree": 0.9,
-    "wahala": 0.8,  # flagged — see note above
+    "no wahala": 0.5,
+    "no gree": -0.3,  # lower-confidence correction; validate on real examples
+    "wahala": -0.4,
     "sweet die": 0.9,
     "on point": 0.9,
-    "shine your eye": 0.7,
+    "shine your eye": -0.4,
     "chop": 0.4,
-    "how body": 0.7,  # flagged — see note above
+    "how body": 0.7,
     "sabi": 0.3,
     "abeg": 0.2,
     "make we": 0.1,
@@ -54,9 +42,9 @@ PIDGIN_LEXICON = {
     "suffering": -0.8,
     "e no be": -0.5,
     "e don spoil": -0.8,
-    "mad o": -0.7,  # flagged — see note above
-    "shey": 0.1,  # flagged — see note above
-    "naija": 0.2,  # flagged — see note above
+    "mad o": 0.0,  # context-dependent slang; intentionally near-neutral
+    "shey": 0.1,
+    "naija": 0.2,
 }
 
 # Small general-purpose English sentiment lexicon. This exists so the

@@ -1,45 +1,19 @@
-"""
-model.py — replaces FYP_NLP/model.py
-
-Changes from the original:
-1. Model load failures are now logged (previously silently swallowed via
-   `except Exception: self.model = False`), and the active mode
-   ("transformer" vs "lexicon_fallback") is tracked and exposed so you can
-   verify at a glance which engine actually served a given response.
-2. Removed the hard "<=2 words -> always neutral" rule, which was
-   overriding your own Pidgin lexicon for single-word reviews (e.g.
-   "wahala" never reached compute_pidgin_boost before). Short text now
-   uses the lexicon signal directly instead of being discarded.
-3. `confidence` and `compound_score` are no longer the same number wearing
-   two names. `confidence` reflects the transformer's own classification
-   probability; `compound_score` is a separate intensity measure that
-   blends the model output with lexicon/emphasis signal.
-4. Added `truncation=True, max_length=512` to the pipeline call so long
-   reviews don't error out or behave unpredictably.
-5. Added an explicit `load()` method so the model can be preloaded at
-   FastAPI startup instead of on the first incoming request (avoids a
-   slow, demo-unfriendly cold start on the first real call).
-6. Fallback predictor now also uses the English lexicon, not just Pidgin +
-   emphasis, so it isn't blind to plain English reviews when it's active.
-"""
+"""Sentiment inference with a confidence-based general/Pidgin ensemble."""
 
 import logging
 import os
+from typing import Any, Callable, Optional
 
 import torch
 from transformers import pipeline
 
-from preprocessing import (
-    clean_text,
-    compute_english_lexicon_boost,
-    compute_pidgin_boost,
-    preserve_emphasis,
-)
+from preprocessing import clean_text, compute_english_lexicon_boost, compute_pidgin_boost, preserve_emphasis
 from schemas import SentimentResult
 
 logger = logging.getLogger("sentiment_model")
 
-DEFAULT_MODEL = "cardiffnlp/twitter-xlm-roberta-base-sentiment"
+DEFAULT_GENERAL_MODEL = "cardiffnlp/twitter-xlm-roberta-base-sentiment"
+DEFAULT_PIDGIN_MODEL = "Davlan/naija-twitter-sentiment-afriberta-large"
 
 
 def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
@@ -47,136 +21,168 @@ def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
 
 
 class SentimentModel:
-    def __init__(self, model_name: str = DEFAULT_MODEL) -> None:
-        self.model_name = model_name
-        self.model = None
-        self.mode = "unloaded"  # "transformer" | "lexicon_fallback" | "unloaded"
+    """Run both specialised classifiers and select the more confident result.
+
+    The Pidgin model's published config maps 0/1/2 to
+    positive/neutral/negative.  Labels are nevertheless read from each loaded
+    model's config at runtime, rather than assuming either pipeline's scheme.
+    """
+
+    def __init__(
+        self,
+        general_model_name: str = DEFAULT_GENERAL_MODEL,
+        pidgin_model_name: str = DEFAULT_PIDGIN_MODEL,
+        pipeline_factory: Callable[..., Any] = pipeline,
+    ) -> None:
+        self.general_model_name = general_model_name
+        self.pidgin_model_name = pidgin_model_name
+        self._pipeline_factory = pipeline_factory
+        self.general_model: Optional[Any] = None
+        self.pidgin_model: Optional[Any] = None
+        self._general_attempted = False
+        self._pidgin_attempted = False
+        self.mode = "unloaded"
+
+    @property
+    def model_name(self) -> str:
+        """Backward-compatible health field describing configured models."""
+        return f"{self.general_model_name}; {self.pidgin_model_name}"
 
     def load(self) -> None:
-        """Explicit preload — call this at app startup, not lazily on first request."""
-        self._load_model()
+        """Preload each model independently; either one may remain usable."""
+        self._load_general_model()
+        self._load_pidgin_model()
+        self._update_mode()
 
-    def _load_model(self):
-        if self.model is not None:
-            return self.model
-
-        model_name = os.getenv("SENTIMENT_MODEL", self.model_name)
+    def _load_pipeline(self, model_name: str, model_kind: str) -> Optional[Any]:
         try:
             device = 0 if torch.cuda.is_available() else -1
-            self.model = pipeline(
-                "sentiment-analysis",
-                model=model_name,
-                tokenizer=model_name,
-                device=device,
-                top_k=None,
-                function_to_apply="softmax",
+            loaded = self._pipeline_factory(
+                "sentiment-analysis", model=model_name, tokenizer=model_name,
+                device=device, top_k=None, function_to_apply="softmax",
             )
-            self.mode = "transformer"
-            logger.info("Sentiment model loaded: %s (device=%s)", model_name, device)
+            logger.info("%s sentiment model loaded: %s (device=%s)", model_kind, model_name, device)
+            return loaded
         except Exception:
-            self.model = False
-            self.mode = "lexicon_fallback"
-            logger.exception(
-                "Failed to load sentiment transformer '%s' — falling back to "
-                "lexicon-only scoring. Predictions from this point on are NOT "
-                "using the transformer model.",
-                model_name,
-            )
-        return self.model
+            logger.exception("Failed to load %s sentiment model '%s'", model_kind, model_name)
+            return None
 
-    def _normalize_label(self, label: str) -> str:
-        normalized = str(label).lower().strip()
-        if "pos" in normalized:
+    def _load_general_model(self) -> Optional[Any]:
+        if not self._general_attempted:
+            self._general_attempted = True
+            name = os.getenv("SENTIMENT_GENERAL_MODEL", self.general_model_name)
+            self.general_model = self._load_pipeline(name, "general")
+        return self.general_model
+
+    def _load_pidgin_model(self) -> Optional[Any]:
+        if not self._pidgin_attempted:
+            self._pidgin_attempted = True
+            name = os.getenv("SENTIMENT_PIDGIN_MODEL", self.pidgin_model_name)
+            self.pidgin_model = self._load_pipeline(name, "Pidgin")
+        return self.pidgin_model
+
+    def _update_mode(self) -> None:
+        if self.general_model is not None and self.pidgin_model is not None:
+            self.mode = "both_loaded"
+        elif self.general_model is not None:
+            self.mode = "general_only"
+        elif self.pidgin_model is not None:
+            self.mode = "pidgin_only"
+        elif self._general_attempted and self._pidgin_attempted:
+            self.mode = "lexicon_fallback"
+        else:
+            self.mode = "unloaded"
+
+    def _normalize_label(self, label: str, classifier: Optional[Any] = None) -> str:
+        """Map native labels (including LABEL_0) to the API's three labels."""
+        raw = str(label).lower().strip()
+        if "pos" in raw:
             return "positive"
-        if "neg" in normalized:
+        if "neg" in raw:
             return "negative"
+        if "neu" in raw:
+            return "neutral"
+
+        # Pipelines sometimes return LABEL_n. Consult the particular model's
+        # config, which is necessary because label indices are not universal.
+        if classifier is not None and raw.startswith("label_"):
+            index = raw.rsplit("_", 1)[-1]
+            id2label = getattr(getattr(classifier, "model", None), "config", None)
+            id2label = getattr(id2label, "id2label", {}) or {}
+            configured = id2label.get(index, id2label.get(int(index), ""))
+            if configured and str(configured).lower() != raw:
+                return self._normalize_label(str(configured))
         return "neutral"
 
-    def _score_to_compound(self, label: str, score: float) -> float:
-        if label == "positive":
-            return score
-        if label == "negative":
-            return -score
-        return 0.0
+    def _best_prediction(self, classifier: Any, text: str) -> dict[str, float | str]:
+        raw_output = classifier(text, truncation=True, max_length=512)
+        # top_k=None gives a list of label dictionaries for one input. Be
+        # defensive about pipeline-version output nesting.
+        if isinstance(raw_output, list) and raw_output and isinstance(raw_output[0], list):
+            raw_output = raw_output[0]
+        scored = raw_output if isinstance(raw_output, list) else [raw_output]
+        best = max(
+            (
+                {"label": self._normalize_label(item.get("label", "neutral"), classifier),
+                 "score": float(item.get("score", 0.0))}
+                for item in scored
+                if isinstance(item, dict)
+            ),
+            key=lambda item: float(item["score"]),
+            default={"label": "neutral", "score": 0.0},
+        )
+        return best
 
-    def _lexicon_only_label(self, pidgin_boost: float, lexicon_boost: float):
+    def _lexicon_only_label(self, pidgin_boost: float, lexicon_boost: float) -> tuple[str, float]:
         combined = pidgin_boost + lexicon_boost
-        if combined > 0.3:
+        if combined >= 0.3:
             return "positive", combined
-        if combined < -0.3:
+        if combined <= -0.3:
             return "negative", combined
         return "neutral", combined
 
-    def _fallback_predict(
-        self, cleaned: str, pidgin_boost: float, emphasis_boost: float, lexicon_boost: float
-    ) -> SentimentResult:
-        """Used when the transformer failed to load. Lexicon + emphasis only."""
-        label, combined = self._lexicon_only_label(pidgin_boost, lexicon_boost)
-        combined += emphasis_boost * 0.3 if label != "neutral" else 0.0
+    def _fallback_predict(self, cleaned: str) -> SentimentResult:
+        """Last resort only: lexicon scoring when neither transformer loaded."""
+        pidgin_boost = compute_pidgin_boost(cleaned)
+        english_boost = compute_english_lexicon_boost(cleaned)
+        label, combined = self._lexicon_only_label(pidgin_boost, english_boost)
+        if label != "neutral":
+            combined += preserve_emphasis(cleaned) * 0.3
         confidence = min(0.85, max(0.15, 0.4 + abs(combined) * 0.4))
-        compound = _clamp(combined)
-        return SentimentResult(label=label, confidence=float(confidence), compound_score=float(compound))
+        return SentimentResult(
+            label=label, confidence=float(confidence), compound_score=float(_clamp(combined)),
+            model_used="lexicon_fallback",
+        )
 
     def predict(self, text: str) -> SentimentResult:
         cleaned = clean_text(text)
         if not cleaned:
             raise ValueError("text cannot be empty or whitespace-only")
 
-        pidgin_boost = compute_pidgin_boost(cleaned)
-        lexicon_boost = compute_english_lexicon_boost(cleaned)
-        emphasis_boost = preserve_emphasis(cleaned)
-        word_count = len(cleaned.split())
+        # No language router: both models see every non-empty request.
+        general = self._load_general_model()
+        pidgin = self._load_pidgin_model()
+        self._update_mode()
+        candidates = []
+        if general is not None:
+            candidates.append(("general", self._best_prediction(general, cleaned)))
+        if pidgin is not None:
+            candidates.append(("pidgin", self._best_prediction(pidgin, cleaned)))
+        if not candidates:
+            return self._fallback_predict(cleaned)
 
-        # Very short text: transformer context is too thin to trust on its
-        # own, and running it through the model wastes a call for a case
-        # the lexicon already answers directly (e.g. "wahala", "sabi").
-        if word_count <= 2:
-            label, combined = self._lexicon_only_label(pidgin_boost, lexicon_boost)
-            confidence = 0.4 if label != "neutral" else 0.3
-            compound = _clamp(combined)
-            return SentimentResult(label=label, confidence=confidence, compound_score=float(compound))
-
-        model = self._load_model()
-        if model is False:
-            return self._fallback_predict(cleaned, pidgin_boost, emphasis_boost, lexicon_boost)
-
-        raw_output = model(cleaned, truncation=True, max_length=512)[0]
-        scored = raw_output if isinstance(raw_output, list) else [raw_output]
-
-        best = None
-        best_score = -1.0
-        for item in scored:
-            label = self._normalize_label(item.get("label", "neutral"))
-            probability = float(item.get("score", 0.0))
-            if probability > best_score:
-                best = {"label": label, "score": probability}
-                best_score = probability
-        if best is None:
-            best = {"label": "neutral", "score": 0.0}
-
-        label = best["label"]
-        # `confidence` is the transformer's own classification probability —
-        # left un-blended with lexicon signal so it means one consistent thing.
+        # max is stable: ties deliberately favour the general model.
+        model_used, best = max(candidates, key=lambda candidate: float(candidate[1]["score"]))
+        label = str(best["label"])
         confidence = float(best["score"])
+        return SentimentResult(
+            label=label, confidence=confidence,
+            compound_score=float(self._score_to_compound(label, confidence)), model_used=model_used,
+        )
 
-        # If the model is unsure AND the lexicon strongly disagrees with it,
-        # let the lexicon override the label. A confident model call is
-        # trusted over the lexicon; an unsure one isn't.
-        lexical_signal = pidgin_boost + lexicon_boost
-        if confidence < 0.55:
-            if lexical_signal > 0.5:
-                label = "positive"
-            elif lexical_signal < -0.5:
-                label = "negative"
-
-        # `compound_score` is a separate intensity measure: starts from the
-        # model's own label+probability, then nudged by lexicon/emphasis
-        # signal rather than reusing `confidence` as its magnitude.
-        compound = self._score_to_compound(label, confidence)
-        compound += _clamp(pidgin_boost) * 0.2 + _clamp(lexicon_boost) * 0.1 + emphasis_boost * 0.1
-        compound = _clamp(compound)
-
-        return SentimentResult(label=label, confidence=confidence, compound_score=float(compound))
+    @staticmethod
+    def _score_to_compound(label: str, score: float) -> float:
+        return score if label == "positive" else -score if label == "negative" else 0.0
 
 
 model = SentimentModel()
@@ -187,5 +193,4 @@ def predict(text: str) -> SentimentResult:
 
 
 def get_status() -> dict:
-    """Used by /health to report which engine is actually active."""
     return {"mode": model.mode, "model_name": model.model_name}

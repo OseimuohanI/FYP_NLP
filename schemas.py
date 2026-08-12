@@ -14,7 +14,7 @@ Changes from the original:
 
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 MAX_BATCH_SIZE = 100
 
@@ -45,9 +45,12 @@ class BatchPredictRequest(BaseModel):
 
 
 class SentimentResult(BaseModel):
+    # `model_used` is part of the public response contract, not Pydantic internals.
+    model_config = ConfigDict(protected_namespaces=())
     label: Literal["positive", "negative", "neutral"]
     confidence: float = Field(ge=0.0, le=1.0)
     compound_score: float = Field(ge=-1.0, le=1.0)
+    model_used: Literal["general", "pidgin", "lexicon_fallback"]
 
 
 class BatchPredictResponse(BaseModel):
@@ -57,4 +60,4 @@ class BatchPredictResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     model: Optional[str] = None
-    mode: Optional[str] = None  # "transformer" | "lexicon_fallback" | "unloaded"
+    mode: Optional[str] = None  # both_loaded | general_only | pidgin_only | lexicon_fallback | unloaded
