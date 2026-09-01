@@ -1,4 +1,6 @@
-"""Sentiment inference with marker-based general/Pidgin model routing."""
+"""
+Sentiment inference with marker-based general/Pidgin model routing.
+"""
 
 import logging
 import os

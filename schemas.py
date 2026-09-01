@@ -2,6 +2,7 @@
 schemas.py
 """
 
+from datetime import date
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -58,3 +59,30 @@ class HealthResponse(BaseModel):
     status: str
     model: Optional[str] = None
     mode: Optional[str] = None  # both_loaded | general_only | pidgin_only | lexicon_fallback | unloaded
+
+
+class WeeklyDataPoint(BaseModel):
+    period_start: date
+    avg_compound_score: float
+    avg_rating: float | None = None
+    review_count: int
+
+
+class ForecastRequest(BaseModel):
+    history: list[WeeklyDataPoint]
+    horizon_weeks: int = Field(default=4, ge=1, le=12)
+
+
+class SeriesForecast(BaseModel):
+    trend_direction: Literal["increasing", "decreasing", "stable"]
+    projected_values: list[float]
+    projected_period_starts: list[date]
+
+
+class ForecastResponse(BaseModel):
+    insufficient_data: bool
+    weeks_of_history: int
+    minimum_weeks_required: int
+    sentiment: SeriesForecast | None = None
+    rating: SeriesForecast | None = None
+    volume: SeriesForecast | None = None

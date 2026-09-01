@@ -9,10 +9,19 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from forecasting import build_forecast
 import model as model_module
 from aggregation import build_batch_summary
 from model import predict
-from schemas import BatchPredictRequest, BatchPredictResponse, HealthResponse, PredictRequest, SentimentResult
+from schemas import (
+    BatchPredictRequest,
+    BatchPredictResponse,
+    ForecastRequest,
+    ForecastResponse,
+    HealthResponse,
+    PredictRequest,
+    SentimentResult,
+)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -67,6 +76,16 @@ def predict_batch(payload: BatchPredictRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - defensive catch
         raise HTTPException(status_code=500, detail=f"batch inference failed: {str(exc)}") from exc
+
+
+@app.post("/forecast", response_model=ForecastResponse)
+def forecast(payload: ForecastRequest):
+    try:
+        return build_forecast(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive catch
+        raise HTTPException(status_code=500, detail=f"forecast generation failed: {str(exc)}") from exc
 
 
 if __name__ == "__main__":
